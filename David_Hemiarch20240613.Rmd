@@ -1,0 +1,1931 @@
+---
+title: "David5_hemiarch"
+author: "Yu Zhao"
+date: "2024-04-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(lubridate)
+library(tidyverse)
+library(tableone)
+library(survival)
+library(survminer)
+library(tidycmprsk)
+library(ggsurvfit)
+```
+
+```{r import data}
+original<-read_csv("C:/Users/Yu Zhao/Box/David_Hemiarch/Complete.csv",
+                   name_repair = "universal")
+
+```
+
+```{r data cleaning}
+sum(original$procz1==1|original$procz2==1|original$proctotarch==1)
+group_arch=ifelse(if_any(c("prochemi", "procz1", "procz2","proctotarch"),~.==1),1,0)
+
+
+df<-original %>% 
+  filter(!(procz1==1|procz2==1|proctotarch==1)) %>% 
+  mutate(across(c(contains("date"),postop_hypoxic,
+                  postop_cnshaemorr,dos),~mdy(.))) %>% 
+  mutate_at(c("hx_htn", "hx_smoking","hx_copd"),~ifelse(.==2,0,.)) %>% 
+  mutate(#prochemi=factor(prochemi,labels = c("No Hemiarch", "Hemiarch")),
+         height=ifelse(height==0,NA,height),
+         nyha=factor(ifelse(is.na(nyha)|nyha %in% 5:6,5,nyha)),
+         followup=ifelse(is.na(followup),0,followup), 
+         xc=as.numeric(xc),
+         diameter_asc_precta=ifelse(diameter_asc_precta=="34..4",
+                                    34.4,as.numeric(diameter_asc_precta)),
+         diameter_asc_precta_2 =ifelse(diameter_asc_precta_2=="44..2",44.2,
+                                       as.numeric(diameter_asc_precta_2)),
+         postop_neuro=ifelse(mrn=="046057055",0,postop_neuro),
+         postop_neurotype=ifelse(mrn=="046057055",NA,
+                                  postop_neurotype),
+         cva=case_when(postop_neurotype %in% (2:3)~1,
+                       postop_neurotype==4 & postop_cnshaemorr_2==0~1,
+                       T~0),
+         cvatype=ifelse(cva==1,postop_neurotype,NA),
+         stroke_cat=ifelse(is.na(stroke_cat) & cvatype==2,3,stroke_cat),
+         cva_dt=case_when(cva==1~coalesce(postop_strokedate,
+                                          postop_hypoxic,postop_cnshaemorr),
+                          T~NA),
+         cva30=ifelse(cva==1 & (cva_dt-dos)<=30,1,0),
+         cva30_dt=case_when(cva30==1~cva_dt,
+                            T~NA),
+         reop_art=ifelse(if_any(starts_with("aorticprocedure")&
+                                    ends_with(c("0","1","2","3","4")),
+                                  ~.==1),1,0),
+         reop_art_dt=case_when(if_any(starts_with("aorticprocedure___")&
+                                    ends_with(c("0","1","2","3","4")),
+                                  ~.==1)~reop_date,
+                                if_any(starts_with("aorticprocedure_2")&
+                                    ends_with(c("0","1","2","3","4")),
+                                  ~.==1)~reop_date_2,
+                                if_any(starts_with("aorticprocedure_3")&
+                                    ends_with(c("0","1","2","3","4")),
+                                  ~.==1)~reop_date_3,
+                                T~NA),
+         vlv_fail=coalesce(pmax(failure, failure_2,failure_3,na.rm = T),
+                           0),
+         disect=if_else(diss_type %in% (1:3),1,0,0),
+         disect_dt=case_when(disect==1~diss_date,T~NA),
+         composite=pmax(mort_all, cva30, reop_art,disect,na.rm = T),
+         composite_dt=case_when(composite==1~pmin(mort_date,cva30_dt,
+                                                  reop_art_dt,disect_dt,
+                                                  na.rm = T),
+                                T~NA),
+         fu_comp_dt=case_when(composite==1~composite_dt,
+                              T~alive_date),
+         fu_comp_yr=round(as.numeric(fu_comp_dt-dos)/365.25,1),
+         fu_mort_dt=pmin(mort_date,alive_date,na.rm = T),
+         fu_mort_yr=round(as.numeric(fu_mort_dt-dos)/365.25,1),
+         fu_cva_dt=pmin(cva_dt,alive_date,mort_date,na.rm = T),
+         fu_cva_yr=round(as.numeric(fu_cva_dt-dos)/365.25,1),
+         cva_compete=case_when(cva==1~1,
+                               mort_all==1~2,
+                               T~0),
+         cva_compete=factor(cva_compete,levels=c("0","1","2")),
+         cva_compete_dt=case_when(cva==1~cva_dt,
+                                  mort_all==1~mort_date,
+                                  T~alive_date),
+         cva_competeyr=round(as.numeric(cva_compete_dt-dos)/365.25,1),
+         reop_compete=case_when(reop_art==1~1,
+                                mort_all==1~2,
+                                T~0),
+         reop_compete=factor(reop_compete,levels=c("0","1","2")),
+         reop_compete_dt=case_when(reop_compete==1~reop_art_dt,
+                                   mort_all==1~mort_date,
+                                   T~alive_date),
+         reop_competeyr=round(as.numeric(reop_compete_dt-dos)/365.25,1),
+         
+         
+         cnnct_tss=pmax(hx_marfans,hx_ld,hx_ot,na.rm = T),
+         bmi=weight/height^2,
+         
+         #reoperation variables
+         reop_surg0=pmax(aorticprocedure___0,aorticprocedure_2___0,
+                         aorticprocedure_3___0,na.rm = T),
+         reop_surg1=pmax(aorticprocedure___1,aorticprocedure_2___1,
+                         aorticprocedure_3___1,na.rm = T),
+         reop_surg2=pmax(aorticprocedure___2,aorticprocedure_2___2,
+                         aorticprocedure_3___2,na.rm = T),
+         reop_surg3=pmax(aorticprocedure___3,aorticprocedure_2___3,
+                         aorticprocedure_3___3,na.rm = T),
+         reop_surg4=pmax(aorticprocedure___4,aorticprocedure_2___4,
+                         aorticprocedure_3___4,na.rm = T),
+         reop_surg5=pmax(aorticprocedure___5,aorticprocedure_2___5,
+                         aorticprocedure_3___5,na.rm = T),
+         reop_surg6=pmax(aorticprocedure___6,aorticprocedure_2___6,
+                         aorticprocedure_3___6,na.rm = T),
+         reop_surg7=pmax(aorticprocedure___7,aorticprocedure_2___7,
+                         aorticprocedure_3___7,na.rm = T),
+         reop_surg8=pmax(aorticprocedure___8,aorticprocedure_2___8,
+                         aorticprocedure_3___8,na.rm = T),
+         reop_vlv=pmax(reop_reason___0,reop_reason_2___0,
+                       reop_reason_3___0,na.rm = T),
+         reop_vlv_ai=pmax(reop_valve___0,reop_valve_2___0,
+                          reop_valve_3___0,na.rm = T),
+         reop_vlv_as=pmax(reop_valve___1,reop_valve_2___1,
+                          reop_valve_3___1,na.rm = T),
+         reop_vlv_endo=pmax(reop_valve___2,reop_valve_2___2,
+                          reop_valve_3___2,na.rm = T),
+         
+         reop_aorta=pmax(reop_reason___1,reop_reason_2___1,
+                       reop_reason_3___1,na.rm = T),
+         reop_aorta_aneu=pmax(reop_aortic___1,reop_aortic_2___1,
+                              reop_aortic_3___1,na.rm=T),
+         reop_aorta_diss=pmax(reop_aortic___2,reop_aortic_2___2,
+                              reop_aortic_3___2,na.rm=T),
+         reop_aorta_infect=pmax(reop_aortic___3,reop_aortic_2___3,
+                              reop_aortic_3___3,na.rm=T),
+         reop_aorta_pseudo=pmax(reop_aortic___4,reop_aortic_2___4,
+                              reop_aortic_3___4,na.rm=T),
+         
+         
+         reop_bleed=pmax(reop_reason___2,reop_reason_2___2,
+                       reop_reason_3___2,na.rm = T),
+         reop_other=pmax(reop_reason___3,reop_reason_2___3,
+                       reop_reason_3___3,na.rm = T),
+         reop_other_cabg=pmax(reop_other___0,reop_other_2___0,
+                              reop_other_3___0,na.rm=T),
+         reop_other_mitral=pmax(reop_other___1,reop_other_2___1,
+                                reop_other_3___1,na.rm=T),
+         reop_other_tricus=pmax(reop_other___2,reop_other_2___2,
+                                reop_other_3___2,na.rm=T),
+         reop_other_pulm=pmax(reop_other___3,reop_other_2___3,
+                              reop_other_3___3,na.rm=T),
+         reop_other_wind=pmax(reop_other___4,reop_other_2___4,
+                              reop_other_3___4,na.rm=T),
+         reop_other_vad=pmax(reop_other___5,reop_other_2___5,
+                             reop_other_3___5,na.rm=T),
+         reop_other_rhyth=pmax(reop_other___6,reop_other_2___6,
+                               reop_other_3___6,na.rm=T),
+         mort30=ifelse(mort_all==1 & (mort_date-dos)<=30,1,0),
+         mort10y=ifelse(mort_all==1 & (mort_date-dos)<=3650,1,0),
+         reop_art30=ifelse(reop_art==1 & 
+                             (reop_art_dt-dos)<=30,1,0),
+         stroke30=if_else(postop_neurotype==2 &
+                           (postop_strokedate-dos)<=30,1,0,0),
+         hypoxic30=if_else(postop_neurotype==3 &
+                           (postop_hypoxic-dos)<=30,1,0,0),
+         cnshaemorr30=ifelse(postop_neurotype==4 & cva==1 &
+                           (postop_cnshaemorr-dos)<=30,1,0),
+         disect30=ifelse(disect==1 & (disect_dt-dos)<=30,1,0),
+         composite30=ifelse(composite==1 &
+                              (composite_dt-dos)<=30,1,0),
+         art_length_group=cut(diameter_asc_precta_length,
+                              breaks = c(0,90,100,110,120,160),
+                              include.lowest = T,right=F),
+         diameter_asc_precta_2_group=cut(diameter_asc_precta_2,
+                                         breaks = c(0,30,35,40,45,60),
+                                         include.lowest = T,right=F),
+         diameter_asc_precta_2_quant=case_when(diameter_asc_precta_2<=32.125~1,
+                                         diameter_asc_precta_2<=36~2,
+                                         diameter_asc_precta_2<=40~3,
+                                         diameter_asc_precta_2>40~4,
+                                         is.na(diameter_asc_precta_2)~5),
+         diameter_asc_precta_2_quant=factor(diameter_asc_precta_2_quant,
+                                      labels = c("<=32.125", "<=36","<=40",
+                                                 ">40", "unknown")),
+         diameter_asc_precta_2_45=case_when(diameter_asc_precta_2<45~1,
+                                            diameter_asc_precta_2>=45~2,
+                                            T~3),
+         diameter_asc_precta_2_45=factor(diameter_asc_precta_2_45,labels = 
+                                           c("<45", ">=45", "unknown")),
+         #try 40 cut off
+         indx_diameter=diameter_asc_precta_2/10/height,
+         indx_diameter_group=cut(indx_diameter,
+                                 breaks = c(0,1.5,1.8,2,2.3,4),
+                                 include.lowest = T,right=F),
+         indx_length=diameter_asc_precta_length/10/height,
+         indx_length_group=cut(indx_length,
+                               breaks = c(0,5.5,6,6.5,7,11),
+                               include.lowest = T,right=F),
+         phenotype=case_when(if_any(c("diameter_sov_precta", "diameter_asc_precta"),
+                                    ~is.na(.))~NA_real_,
+                             diameter_sov_precta > diameter_asc_precta~1,
+                             T~0)
+                             
+         )
+
+
+table(df$indx_diameter_group,useNA = "ifany")
+summary(df$indx_diameter)
+table(df$indx_length_group,useNA = "ifany")
+summary(df$indx_length)
+
+
+,
+         diameter_asc_precta_2_quant=case_when(diameter_asc_precta_2<=31~1,
+                                         diameter_asc_precta_2<35~2,
+                                         diameter_asc_precta_2<37.8~3,
+                                         diameter_asc_precta_2<41~4,
+                                         diameter_asc_precta_2>=41~5,
+                                         is.na(diameter_asc_precta_2)~6),
+
+test<-df %>% select(postop_neurotype,cva,cvatype,
+                    postop_tiadate,postop_strokedate,
+                    postop_hypoxic,postop_cnshaemorr)
+
+table(df$mort_all,is.na(df$mort_date))
+table(df$cva30,is.na(df$cva30_dt))
+table(df$reop_art,is.na(df$reop_art_dt))
+table(df$disect,is.na(df$disect_dt))
+table(df$composite,is.na(df$composite_dt))
+
+
+test<-df %>% 
+  select(starts_with("aorticprocedure")&ends_with(c("0","1","2","3","4")),
+                    starts_with("reop_date"),reop_art, reop_art_dt) %>% 
+  filter(reop_art==1)
+```
+
+#1. Matching
+```{r propensity score matching}
+library(MatchIt)
+prematch<-df %>% 
+  select(mrn,prochemi,sex, age, hx_bav, cnnct_tss, hx_htn, hx_diabetes, 
+         hx_smoking, hx_cad, hx_copd, hx_stroke, bmi, nyha, 
+         demo_prior, diameter_asc_precta_2_45, lvef_intra)
+
+nacheck<-prematch %>%
+  summarise_all(~sum(is.na(.))) %>% 
+  t()
+
+prematch[is.na(prematch)]<--1
+
+#check VIF of the matching model
+m_match<-glm(prochemi~sex+ age+ hx_bav+ cnnct_tss+ hx_htn+ 
+               hx_diabetes+ hx_smoking+ hx_cad+ hx_copd+ 
+               hx_stroke+ bmi+ nyha+ demo_prior+ 
+               diameter_asc_precta_2_45+ lvef_intra, 
+               data = prematch,family = binomial)
+car::vif(m_match)
+
+match_near<-matchit(prochemi~sex+ age+ hx_bav+ cnnct_tss+ hx_htn+ 
+                    hx_diabetes+ hx_smoking+ hx_cad+ hx_copd+ 
+                    hx_stroke+ bmi+ nyha+ demo_prior+ lvef_intra+
+                    diameter_asc_precta_2_45, 
+                    data = prematch,distance = "glm", caliper = 0.2)
+
+w.out<-matchit(prochemi~sex+ age+ hx_bav+ cnnct_tss+ hx_htn+ 
+                    hx_diabetes+ hx_smoking+ hx_cad+ hx_copd+ 
+                    hx_stroke+ bmi+ nyha+ demo_prior+ lvef_intra+
+                    diameter_asc_precta_2_quant, 
+                    data = prematch,distance = "glm")
+
+
+match_opt<-matchit(prochemi~sex+ age+ hx_bav+ cnnct_tss+ hx_htn+ 
+                    hx_diabetes+ hx_smoking+ hx_cad+ hx_copd+ 
+                    hx_stroke+ bmi+ nyha+ demo_prior+ lvef_intra+
+                    diameter_asc_precta_2_45, 
+                    data = prematch, distance = "glm",
+                   method = "optimal")
+plot(summary(match_near))
+plot(summary(match_opt))
+
+new.names <- c(distance="Distance",
+               age="Age at surgery",
+               sex="Sex",
+               hx_bav="BAV",
+               cnnct_tss="Connective tissue disorder",
+               hx_htn="Hypertension",
+               hx_diabetes="Diabetes",
+               hx_smoking="Smoker",
+               hx_cad="CAD",
+               hx_copd="Chronic Lung Disease",
+               hx_stroke="Stroke",
+               bmi="BMI",
+               nyha="NYHA",
+               demo_prior="Prior Open Cardiac Surgery",
+               lvef_intra="LVEF",
+               diameter_asc_precta_2_45="Pre-op Ascending Aortic Diameter")
+
+cobalt::love.plot(match_near,
+                  s.d.denom = "pooled",
+                  stats="mean.diffs",
+                  drop.distance = TRUE,
+                  thresholds = 0.1,
+                  abs=T,
+                  sample.names = c("Unmatched", "Matched"),
+                  stars = "raw",
+                  var.names = new.names)
+cobalt::bal.tab(match_near, abs=T,binary = "std", 
+                m.threshold = 0.1,s.d.denom = "pooled",)
+
+cobalt::bal.tab(w.out, abs=T,binary = "std", 
+                m.threshold = 0.1,s.d.denom = "pooled",)
+
+mid<-match.data(match_near)
+
+df_match<-match.data(match_near) %>% 
+  select(mrn,subclass) %>% 
+  left_join(df)
+
+print(CreateTableOne(c("diameter_asc_precta_2",
+                       "diameter_asc_precta_2_45"),
+                     strata = "prochemi",data=df_match,
+               includeNA=T),noSpaces = T, smd = T)
+
+print(CreateTableOne(c("diameter_asc_precta_2",
+                       "diameter_asc_precta_2_45"),
+                     strata = "prochemi",data=df,
+               includeNA=T),noSpaces = T, smd = T)
+
+```
+
+
+
+#12. Tables
+```{r overall cohort}
+df_var<-df %>% 
+  select(sex, age, hx_bav, cnnct_tss,hx_htn, hx_diabetes, hx_smoking, 
+         hx_cad, hx_copd, hx_stroke, bmi, nyha, demo_prior, 
+         diameter_annulus_precta, diameter_sov_precta, 
+         diameter_asc_precta, diameter_asc_precta_2, diameter_asc_precta_2_45,
+         diameter_arch_precta, diameter_asc_precta_length,phenotype,
+         lvef_intra, cpb, xc, circarrest, circarrest_time, 
+         cerebral_perf_time,cerebral_perf_strategy___1:cerebral_perf_strategy___5,
+         cerebralperf,bavtype, conjoinedcusp, proccabg, 
+         procmitral, procasc, procz1, procz2, proctotarch, 
+         procother, valsalvagraft, archgraft, ai_intrapost, 
+         aipeak, aimean, followup, mort_all, followup_days, 
+         willisi_variation, cva, vlv_fail,reop_art, reop_surg0:reop_surg4,
+         disect, composite,reop_pacer,
+         ends_with("30"))
+
+#reop_vlv:reop_other_rhyth,
+#####Unmatched####
+var_demo=colnames(df_var)[1:13]
+numvar_demo=c("age", "bmi")
+catvar_demo=var_demo[!var_demo %in% numvar_demo]
+print(CreateTableOne(var_demo,strata = "prochemi",data=df,
+               factorVars = catvar_demo,includeNA = T),
+      smd = T, noSpaces = T,nonnormal = numvar_demo,
+      test=F,exact = c("nyha"))
+
+print(CreateCatTable("sex",strata = "prochemi",data=df),
+      smd = T, noSpaces = T, showAllLevels = T)
+
+
+var_other=colnames(df_var)[14:70]
+numvar_other=c("diameter_annulus_precta","diameter_sov_precta",
+              "diameter_asc_precta","diameter_asc_precta_2", 
+              "diameter_arch_precta","diameter_asc_precta_length",
+              "lvef_intra", "cpb", "xc", "circarrest_time",
+              "cerebral_perf_time","valsalvagraft", "archgraft",
+              "aipeak", "aimean", "followup_days")
+catvar_other=var_other[!var_other %in% numvar_other]
+
+lapply(select(df,age, bmi,all_of(numvar_other)), shapiro.test)
+#diameter_arch_precta,diameter_asc_precta_length normal
+
+tb<-CreateTableOne(var_other,strata = "prochemi",data=df,
+               factorVars = catvar_other,includeNA=T)
+print(tb,noSpaces = T,nonnormal = numvar_other,
+      exact = c("bavtype","conjoinedcusp","disect", "reop_pacer",
+                "mort30","reop_art30", "hypoxic30", "diss_type",
+                "disect30","reop_surg0", "reop_surg1","reop_surg2",
+                "reop_surg3","reop_surg4"))
+
+prop.test(x=c(19,12),n=c(585,401))
+
+#subvariables
+perfvar=c("cerebral_perf_strategy___1","cerebral_perf_strategy___2",
+          "cerebral_perf_strategy___3", "cerebral_perf_strategy___4",
+          "cerebral_perf_strategy___5", "cerebralperf")
+print(CreateCatTable(perfvar,data=df[df$circarrest==1,]),
+      noSpaces = T, showAllLevels = T)
+
+
+print(CreateCatTable("cvatype",strata = "prochemi",
+                     data=df[df$cva==1,]),
+      noSpaces = T,exact="cvatype",showAllLevels = T)
+
+print(CreateCatTable("cvatype",strata = "prochemi",
+                     data=df[df$cva30==1,]),
+      noSpaces = T,exact="cvatype",showAllLevels = T)
+
+print(CreateCatTable("diss_type",strata = "prochemi",
+                     data=df[df$disect==1,]),
+      noSpaces = T,exact="diss_type")
+
+print(CreateCatTable(c("stroke_cat","stroke_severity","stroke_rankin"),
+                     strata = "prochemi",data=df[df$cvatype==2,],
+                     includeNA = T),
+      noSpaces = T,showAllLevels = T,
+      exact = c("stroke_cat","stroke_severity","stroke_rankin"))
+
+print(CreateCatTable(c("stroke_cat","stroke_severity","stroke_rankin"),
+                     strata = "prochemi",data=df[df$cvatype==2&df$cva30==1,],
+                     includeNA = T),
+      noSpaces = T,showAllLevels = T,
+      exact = c("stroke_cat","stroke_severity","stroke_rankin"))
+
+
+print(CreateCatTable("cause_of_mort",strata = "prochemi",
+                     data=df[df$mort_all==1,]),
+      noSpaces = T,showAllLevels = T)
+
+print(CreateCatTable("cause_of_mort",strata = "prochemi",
+                     data=df[df$mort30==1,]),
+      noSpaces = T,showAllLevels = T, exact="cause_of_mort")
+
+CreateCatTable("mort10y",df,strata="prochemi")
+print(CreateCatTable("cause_of_mort",strata = "prochemi",
+                     data=df[df$mort10y==1,]),
+      noSpaces = T,showAllLevels = T, exact="cause_of_mort")
+
+print(CreateCatTable("diss_type",strata = "prochemi",
+                     data=df[df$disect==1,]),
+      noSpaces = T,showAllLevels = T)
+
+
+
+####matched####
+print(CreateTableOne(var_demo,strata = "prochemi",data=df_match,
+               factorVars = catvar_demo),
+      smd = T, noSpaces = T, nonnormal = numvar_demo,
+      test=F)
+print(CreateTableOne(var_other,strata = "prochemi",data=df_match,
+               factorVars = catvar_other,includeNA=T),
+      noSpaces = T,nonnormal = numvar_other,
+      exact = c("bavtype","conjoinedcusp","disect", "reop_pacer",
+                "mort30","reop_art30", "hypoxic30", "diss_type",
+                "disect30","reop_surg0", "reop_surg1","reop_surg2",
+                "reop_surg3","reop_surg4","reop_art"))
+
+print(CreateCatTable("sex",strata = "prochemi",data=df_match),
+      smd = T, noSpaces = T, showAllLevels = T)
+
+prop.test(x=c(12,11),n=c(365,365))
+
+#subvar
+print(CreateCatTable(perfvar,data=df_match[df_match$circarrest==1,]),
+      noSpaces = T,showAllLevels = T)
+
+
+print(CreateCatTable("cause_of_mort",strata = "prochemi",data=df_match[df_match$mort_all==1,]),
+      noSpaces = T,showAllLevels = T)
+
+print(CreateCatTable("cvatype",strata ="prochemi",
+                     data=df_match[df_match$cva==1,]),
+      noSpaces = T,exact = "cvatype")
+
+print(CreateCatTable("cvatype",strata ="prochemi",
+                     data=df_match[df_match$cva30==1,]),
+      noSpaces = T,exact = "cvatype",showAllLevels = T)
+
+print(CreateCatTable(c("stroke_cat","stroke_severity","stroke_rankin"),
+                     strata = "prochemi",data=df_match[df_match$cvatype==2,],
+                     includeNA = T),
+      noSpaces = T,showAllLevels = T,
+      exact = c("stroke_cat","stroke_severity","stroke_rankin"))
+
+print(CreateCatTable(c("stroke_cat","stroke_severity","stroke_rankin"),
+                     strata = "prochemi",data=df_match[df_match$cvatype==2&df_match$cva30==1,],
+                     includeNA = T),
+      noSpaces = T,showAllLevels = T,
+      exact = c("stroke_cat","stroke_severity","stroke_rankin"))
+
+
+print(CreateCatTable("diss_type",strata = "prochemi",
+                     data=df_match[df_match$disect==1,]),
+      noSpaces = T,exact="cvatype")
+
+print(CreateCatTable("cause_of_mort",strata = "prochemi",data=df_match[df_match$mort30==1,],
+                     includeNA = T),
+      noSpaces = T,showAllLevels = T)
+
+CreateCatTable("mort10y",df_match,strata="prochemi")
+print(CreateCatTable("cause_of_mort",strata = "prochemi",
+                     data=df_match[df_match$mort10y==1,]),
+      noSpaces = T,showAllLevels = T, exact="cause_of_mort")
+
+print(CreateCatTable("diss_type",strata = "prochemi",
+                     data=df_match[df_match$disect==1,]),
+      noSpaces = T,showAllLevels = T)
+
+print(CreateCatTable("diss_type",strata = "prochemi",
+                     data=df_match[df_match$disect30==1,]),
+      noSpaces = T,showAllLevels = T)
+
+
+prop.test(x=c(12,9),n=c(331,331))
+(p1-p2)/sqrt((p1*(1-p1)+p2*(1-p2))/2)
+```
+
+
+
+#3. Long-term outcome
+```{r before matching}
+kmtest<-df %>% 
+  select(mrn,prochemi,phenotype,alive_date,composite,fu_comp_yr,mort_all,fu_mort_yr,
+         cva_compete,cva_competeyr, reop_compete, reop_competeyr) %>% 
+  mutate(composite10=ifelse(fu_comp_yr>10,0,composite),
+         fu_comp_yr10=ifelse(fu_comp_yr>10,10,fu_comp_yr),
+         mort10=ifelse(fu_mort_yr>10,0,mort_all),
+         fu_mort_yr10=ifelse(fu_mort_yr>10,10,fu_mort_yr),
+         cva_compete10=ifelse(cva_competeyr>10,0,as.character(cva_compete)),
+         cva_competeyr10=ifelse(cva_competeyr>10,10,cva_competeyr),
+         cva_compete10=factor(cva_compete10,levels=c("0","1","2")),
+         reop_compete10=ifelse(reop_competeyr>10,0,as.character(reop_compete)),
+         reop_competeyr10=ifelse(reop_competeyr>10,10,reop_competeyr),
+         reop_compete10=factor(reop_compete10,levels=c("0","1","2")))
+
+
+####composite outcome####
+km_comp<-survfit(Surv(fu_comp_yr,composite)~prochemi,data=df)
+
+surv_comp<-ggsurvplot(km_comp,
+                   title = "Freedom from composite outcome before matching",
+                   xlab = "Follow-up time (year)",
+                   conf.int = T,
+                   break.time.by = 1,
+                   xlim=c(0,11),
+                   ylim=c(0.5,1),
+                   risk.table = TRUE,
+                   tables.height = 0.2,
+                   censor = F,
+                   legend.labs=c("No Hemiarch","Hemiarch"),
+                   tables.theme = theme_cleantable())
+
+ggexport(surv_comp,filename = "composite_unmatch.pdf")
+
+t<-summary(km_comp,times = c(1,3,5,7,10))
+cols <- lapply(c(2:6,15,16,10) , function(x) t[x])
+tbl_comp<- do.call(data.frame, cols) %>% 
+  mutate(text=paste0(round(surv*100,1)," (",round(lower*100,1),"-",round(upper*100,1),")"))
+survdiff(Surv(fu_comp_yr,composite)~prochemi,data=df,fu_comp_yr<=10)
+
+survdiff(Surv(fu_comp_yr10,composite10)~prochemi,data=kmtest)
+
+
+####mortality####
+km_mort<-survfit(Surv(fu_mort_yr,mort_all)~prochemi,data=df)
+
+surv_mort<-ggsurvplot(km_mort,
+                   title = "Freedom from death before matching",
+                   xlab = "Follow-up time (year)",
+                   conf.int = T,
+                   break.time.by = 1,
+                   xlim=c(0,11),
+                   ylim=c(0.5,1),
+                   risk.table = TRUE,
+                   tables.height = 0.2,
+                   censor = F,
+                   legend.labs=c("No Hemiarch","Hemiarch"),
+                   tables.theme = theme_cleantable())
+ggexport(surv_mort,filename = "death_unmatch.pdf")
+
+t<-summary(km_mort,times = c(1,3,5,7,10))
+cols <- lapply(c(2:6,15,16,10) , function(x) t[x])
+tbl_death<- do.call(data.frame, cols) %>% 
+  mutate(text=paste0(round(surv*100,1)," (",round(lower*100,1),"-",round(upper*100,1),")"))
+survdiff(Surv(fu_mort_yr,mort_all)~prochemi,data=df,fu_mort_yr<=10)
+
+survdiff(Surv(fu_mort_yr10,mort10)~prochemi,data=kmtest)
+
+
+####cva####
+cif<-cuminc(Surv(cva_competeyr,cva_compete)~prochemi,df[!is.na(df$fu_comp_yr),]) 
+
+p_cif<-ggcuminc(cif,linewidth=1,outcome = 1) + 
+  add_censor_mark(size=1.5) +
+  labs(x = "Follow-up time (year)",title="Cumulative incidence of CVA with competing risk of death \n before matching") + 
+  add_confidence_interval() +
+  add_risktable(risktable_stats = c("n.risk"),
+                size=4,
+                stats_label = list(n.risk = "Number at Risk"),
+                risktable_height=0.15,
+                theme = list(theme_risktable_default(axis.text.y.size = 12, 
+                                                     plot.title.size = 15)))+
+  add_risktable_strata_symbol()+
+  scale_x_continuous(breaks=seq(0,11,by=1),limits=c(0,11))+
+  scale_y_continuous(limits = c(0,1))+
+  scale_color_manual(values = c('#F87664', '#00BFC4'),
+                     labels = c('No Hemiarch', 'Hemiarch')) +
+  scale_fill_manual(values = c('#F87664', '#00BFC4'),
+                    labels = c('No Hemiarch', 'Hemiarch'))+
+  theme_survminer()
+
+tbl_cva<-p_cif$data %>% 
+  filter(time %in% c(1,3,5,7,9.9,10)) %>% 
+  select(time, strata,estimate,conf.low,conf.high) %>% 
+  mutate(text=paste0(round(estimate*100,1)," (",round(conf.low*100,1),"-",round(conf.high*100,1),")"))
+
+
+
+####reintervention####
+cif<-cuminc(Surv(reop_competeyr,reop_compete)~prochemi,df) 
+
+cif_unm<-ggcuminc(cif,linewidth=1,outcome = 1) + 
+  #add_censor_mark(size=1.5) +
+  labs(x = "Follow-up time (year)",title="Cumulative incidence of aortic reintervention with competing \n risk of death before matching") + 
+  add_confidence_interval() +
+  add_risktable(risktable_stats = c("n.risk"),
+                size=4,
+                stats_label = list(n.risk = "Number at Risk"),
+                risktable_height=0.15,
+                theme = list(theme_risktable_default(axis.text.y.size = 12, 
+                                                     plot.title.size = 15)))+
+  add_risktable_strata_symbol()+
+  scale_x_continuous(breaks=seq(0,11,by=1),limits=c(0,11))+
+  scale_y_continuous(limits = c(0,0.5))+
+  scale_color_manual(values = c('#F87664', '#00BFC4'),
+                     labels = c('No Hemiarch', 'Hemiarch')) +
+  scale_fill_manual(values = c('#F87664', '#00BFC4'),
+                    labels = c('No Hemiarch', 'Hemiarch'))+
+  theme_survminer()
+ggexport(cif_unm,filename = "reop_unmatch.pdf")
+
+
+tbl_reop<-cif_unm$data %>% 
+  filter(time %in% c(1,3,5,7,9.9,10)) %>% 
+  select(time, strata,estimate,conf.low,conf.high) %>% 
+  mutate(text=paste0(round(estimate*100,1)," (",round(conf.low*100,1),"-",round(conf.high*100,1),")"))
+
+cuminc(Surv(reop_competeyr10,reop_compete10)~prochemi,kmtest) 
+```
+
+```{r after matching}
+kmtest_match<-df_match %>% 
+  select(prochemi,composite,fu_comp_yr,mort_all,fu_mort_yr,
+         cva_compete,cva_competeyr, reop_compete, reop_competeyr) %>% 
+  mutate(composite10=ifelse(fu_comp_yr>10,0,composite),
+         fu_comp_yr10=ifelse(fu_comp_yr>10,10,fu_comp_yr),
+         mort10=ifelse(fu_mort_yr>10,0,mort_all),
+         fu_mort_yr10=ifelse(fu_mort_yr>10,10,fu_mort_yr),
+         cva_compete10=ifelse(cva_competeyr>10,0,as.character(cva_compete)),
+         cva_competeyr10=ifelse(cva_competeyr>10,10,cva_competeyr),
+         cva_compete10=factor(cva_compete10,levels=c("0","1","2")),
+         reop_compete10=ifelse(reop_competeyr>10,0,as.character(reop_compete)),
+         reop_competeyr10=ifelse(reop_competeyr>10,10,reop_competeyr),
+         reop_compete10=factor(reop_compete10,levels=c("0","1","2")))
+
+
+####composite outcome####
+km_comp<-survfit(Surv(fu_comp_yr,composite)~prochemi,data=df_match)
+
+surv_comp<-ggsurvplot(km_comp,
+                   title = "Freedom from composite outcome after matching",
+                   xlab = "Follow-up time (year)",
+                   conf.int = T,
+                   break.time.by = 1,
+                   xlim=c(0,11),
+                   ylim=c(0.5,1),
+                   risk.table = TRUE,
+                   tables.height = 0.2,
+                   censor = F,
+                   legend.labs=c("No Hemiarch","Hemiarch"),
+                   tables.theme = theme_cleantable())
+ggexport(surv_comp,"composite_match.pdf")
+
+t<-summary(km_comp,times = c(1,3,5,7,10))
+cols <- lapply(c(2:6,15,16,10) , function(x) t[x])
+tbl_comp<- do.call(data.frame, cols) %>% 
+  mutate(text=paste0(round(surv*100,1)," (",round(lower*100,1),"-",round(upper*100,1),")"))
+survdiff(Surv(fu_comp_yr,composite)~prochemi,data=kmtest_match,fu_comp_yr<=10)
+
+survdiff(Surv(fu_comp_yr10,composite10)~prochemi,data=kmtest_match)
+
+
+#####mortality####
+km_mort<-survfit(Surv(fu_mort_yr,mort_all)~prochemi,data=df_match)
+
+surv_mort<-ggsurvplot(km_mort,
+                   title = "Freedom from death after matching",
+                   xlab = "Follow-up time (year)",
+                   conf.int = T,
+                   break.time.by = 1,
+                   xlim=c(0,11),
+                   ylim=c(0.5,1),
+                   risk.table = TRUE,
+                   tables.height = 0.2,
+                   censor = F,
+                   legend.labs=c("No Hemiarch","Hemiarch"),
+                   tables.theme = theme_cleantable())
+
+ggexport(surv_mort,"death_match.pdf")
+
+t<-summary(km_mort,times = c(1,3,5,7,10))
+cols <- lapply(c(2:6,15,16,10) , function(x) t[x])
+tbl_death<- do.call(data.frame, cols) %>% 
+  mutate(text=paste0(round(surv*100,1)," (",round(lower*100,1),"-",round(upper*100,1),")"))
+survdiff(Surv(fu_mort_yr,mort_all)~prochemi,data=df_match,fu_mort_yr<=10)
+
+survdiff(Surv(fu_mort_yr10,mort10)~prochemi,data=kmtest_match)
+
+
+####cva####
+cif<-cuminc(Surv(cva_competeyr,cva_compete)~prochemi,df_match) 
+
+p_cif<-ggcuminc(cif,linewidth=1,outcome = 1) + 
+  add_censor_mark(size=1.5) +
+  labs(x = "Follow-up time (year)",title="Cumulative incidence of CVA with competing  \n risk of death after matching") + 
+  add_confidence_interval() +
+  add_risktable(risktable_stats = c("n.risk"),
+                size=4,
+                stats_label = list(n.risk = "Number at Risk"),
+                risktable_height=0.15,
+                theme = list(theme_risktable_default(axis.text.y.size = 12, 
+                                                     plot.title.size = 15)))+
+  add_risktable_strata_symbol()+
+  scale_x_continuous(breaks=seq(0,11,by=1),limits=c(0,11))+
+  scale_y_continuous(limits = c(0,1))+
+  scale_color_manual(values = c('#F87664', '#00BFC4'),
+                     labels = c('No Hemiarch', 'Hemiarch')) +
+  scale_fill_manual(values = c('#F87664', '#00BFC4'),
+                    labels = c('No Hemiarch', 'Hemiarch'))+
+  theme_survminer()
+
+tbl_cva<-p_cif$data %>% 
+  filter(time %in% c(1,3,5,7,9.7,9.9,10)) %>% 
+  select(time, strata,estimate,conf.low,conf.high) %>% 
+  mutate(text=paste0(round(estimate*100,1)," (",round(conf.low*100,1),"-",round(conf.high*100,1),")"))
+
+
+####reintervention####
+cif<-cuminc(Surv(reop_competeyr,reop_compete)~prochemi,df_match) 
+
+p_cif<-ggcuminc(cif,linewidth=1,outcome = 1) + 
+  #add_censor_mark(size=1.5) +
+  labs(x = "Follow-up time (year)",title="Cumulative incidence of aortic reintervention with competing  \n risk of death after matching") + 
+  add_confidence_interval() +
+  add_risktable(risktable_stats = c("n.risk"),
+                size=4,
+                stats_label = list(n.risk = "Number at Risk"),
+                risktable_height=0.15,
+                theme = list(theme_risktable_default(axis.text.y.size = 12, 
+                                                     plot.title.size = 15)))+
+  add_risktable_strata_symbol()+
+  scale_x_continuous(breaks=seq(0,11,by=1),limits=c(0,11))+
+  scale_y_continuous(limits = c(0,0.5))+
+  scale_color_manual(values = c('#F87664', '#00BFC4'),
+                     labels = c('No Hemiarch', 'Hemiarch')) +
+  scale_fill_manual(values = c('#F87664', '#00BFC4'),
+                    labels = c('No Hemiarch', 'Hemiarch'))+
+  theme_survminer()
+
+ggexport(p_cif,"reop_match.pdf")
+
+tbl_reop<-p_cif$data %>% 
+  filter(time %in% c(1,3,5,6.9,7,9.9,10)) %>% 
+  select(time, strata,estimate,conf.low,conf.high) %>% 
+  mutate(text=paste0(round(estimate*100,1)," (",round(conf.low*100,1),"-",round(conf.high*100,1),")"))
+
+cuminc(Surv(reop_competeyr10,reop_compete10)~prochemi,kmtest_match)
+```
+
+#4. Subgroup analysis
+##4.1 connective tissue disorder subgroup
+```{r tables}
+df_cnn<-df %>% filter(cnnct_tss==1)
+
+subvar=c("hx_marfans","hx_ld",var_demo,
+         (colnames(df_var)[c(47,50:68)]))
+subvar_cat=subvar[!subvar %in% c("age", "bmi")]
+print(CreateTableOne(subvar,strata = "prochemi",
+                     data=df_cnn,factorVars =subvar_cat ,includeNA = T),
+      noSpaces = T,exact = subvar[-c(1:3,5,7,9,26)],
+      nonnormal = c("age", "bmi"))
+
+print(CreateCatTable("sex",strata = "prochemi",
+                     data=df_cnn), showAllLevels = T)
+
+print(CreateCatTable("cvatype",strata = "prochemi",
+                     data=df_cnn[df_cnn$cva==1,],includeNA = T),
+      showAllLevels = T,exact = "cvatype")
+
+print(CreateCatTable("diss_type",strata = "prochemi",
+                     data=df_cnn[df_cnn$disect==1,],includeNA = T),
+      showAllLevels = T,exact = "diss_type")
+
+
+
+```
+
+
+```{r KM curves}
+kmtest<-df_cnn %>% 
+  select(prochemi,composite,fu_comp_yr,mort_all,fu_mort_yr,
+         cva_compete,cva_competeyr, reop_compete, reop_competeyr) %>% 
+  mutate(composite10=ifelse(fu_comp_yr>10,0,composite),
+         fu_comp_yr10=ifelse(fu_comp_yr>10,10,fu_comp_yr),
+         mort10=ifelse(fu_mort_yr>10,0,mort_all),
+         fu_mort_yr10=ifelse(fu_mort_yr>10,10,fu_mort_yr),
+         cva_compete10=ifelse(cva_competeyr>10,0,as.character(cva_compete)),
+         cva_competeyr10=ifelse(cva_competeyr>10,10,cva_competeyr),
+         cva_compete10=factor(cva_compete10,levels=c("0","1","2")),
+         
+         reop_compete10=ifelse(reop_competeyr>10,0,as.character(reop_compete)),
+         reop_competeyr10=ifelse(reop_competeyr>10,10,reop_competeyr),
+         reop_compete10=factor(reop_compete10,levels=c("0","1","2")),
+         )
+
+####composite outcome####
+km_comp<-survfit(Surv(fu_comp_yr,composite)~prochemi,data=df_cnn)
+
+surv_comp<-ggsurvplot(km_comp,
+                   title = "Freedom from composite outcome",
+                   subtitle="Among patients with HTAD",
+                   xlab = "Follow-up time (year)",
+                   conf.int = T,
+                   break.time.by = 1,
+                   xlim=c(0,11),
+                   ylim=c(0.5,1),
+                   risk.table = TRUE,
+                   tables.height = 0.2,
+                   censor = F,
+                   legend.labs=c("No Hemiarch","Hemiarch"),
+                   tables.theme = theme_cleantable())
+
+ggexport(surv_comp,"htad_composite")
+
+t<-summary(km_comp,times = c(1,3,5,7,10))
+cols <- lapply(c(2:6,15,16,10) , function(x) t[x])
+tbl_comp<- do.call(data.frame, cols) %>% 
+  mutate(text=paste0(round(surv*100,1)," (",round(lower*100,1),"-",round(upper*100,1),")"))
+survdiff(Surv(fu_comp_yr,composite)~prochemi,data=df_cnn,fu_comp_yr<=10)
+
+survdiff(Surv(fu_comp_yr10,composite10)~prochemi,data=kmtest)
+
+####mortality####
+km_mort<-survfit(Surv(fu_mort_yr,mort_all)~prochemi,data=df_cnn)
+summary(df_cnn[df_cnn$mort_all==1,]$fu_mort_yr)
+
+surv_mort<-ggsurvplot(km_mort,
+                   title = "Freedom from death",
+                   subtitle="Among patients with HTAD",
+                   xlab = "Follow-up time (year)",
+                   conf.int = T,
+                   break.time.by = 1,
+                   xlim=c(0,11),
+                   ylim=c(0.5,1),
+                   risk.table = TRUE,
+                   tables.height = 0.2,
+                   censor = T,
+                   legend.labs=c("No Hemiarch","Hemiarch"),
+                   tables.theme = theme_cleantable())
+
+ggexport(surv_mort,"htad_death.pdf")
+
+t<-summary(km_mort,times = c(1,3,5,7,10))
+cols <- lapply(c(2:6,15,16,10) , function(x) t[x])
+tbl_death<- do.call(data.frame, cols) %>% 
+  mutate(text=paste0(round(surv*100,1)," (",round(lower*100,1),"-",round(upper*100,1),")"))
+survdiff(Surv(fu_mort_yr,mort_all)~prochemi,data=df_cnn,fu_mort_yr<=10)
+
+survdiff(Surv(fu_mort_yr10,mort10)~prochemi,data=kmtest)
+
+
+####cva####
+cif<-cuminc(Surv(cva_competeyr,cva_compete)~prochemi,df_cnn) 
+
+p_cif<-ggcuminc(cif,linewidth=1,outcome = 1) + 
+  #add_censor_mark(size=1.5) +
+  labs(x = "Follow-up time (year)",
+       title="Cumulative incidence of CVA with competing risk of death",
+       subtitle="Among patients with connective tissue disorder",) + 
+  add_confidence_interval() +
+  add_risktable(risktable_stats = c("n.risk"),
+                size=4,
+                stats_label = list(n.risk = "Number at Risk"),
+                risktable_height=0.15,
+                theme = list(theme_risktable_default(axis.text.y.size = 12, 
+                                                     plot.title.size = 15)))+
+  add_risktable_strata_symbol()+
+  scale_x_continuous(breaks=seq(0,11,by=1),limits=c(0,11.3))+
+  scale_y_continuous(limits = c(0,1))+
+  scale_color_manual(values = c('#F87664', '#00BFC4'),
+                     labels = c('No Hemiarch', 'Hemiarch')) +
+  scale_fill_manual(values = c('#F87664', '#00BFC4'),
+                    labels = c('No Hemiarch', 'Hemiarch'))+
+  theme_survminer()
+
+tbl_cva<-p_cif$data %>% 
+  filter(time %in% c(0.9,1,3,4.9,5,6.7,7,9.6,9.9)) %>% 
+  select(time, strata,estimate,conf.low,conf.high) %>% 
+  mutate(text=paste0(round(estimate*100,1)," (",round(conf.low*100,1),"-",round(conf.high*100,1),")"))
+
+
+
+####reintervention####
+cif<-cuminc(Surv(reop_competeyr,reop_compete)~prochemi,df_cnn) 
+
+p_cif<-ggcuminc(cif,linewidth=1,outcome = 1) + 
+  #add_censor_mark(size=1.5) +
+  labs(x = "Follow-up time (year)",
+       title="Cumulative incidence of aortic reintervention with competing \n risk of death",
+       subtitle="Among patients with connective tissue disorder",) + 
+  add_confidence_interval() +
+  add_risktable(risktable_stats = c("n.risk"),
+                size=4,
+                stats_label = list(n.risk = "Number at Risk"),
+                risktable_height=0.15,
+                theme = list(theme_risktable_default(axis.text.y.size = 12, 
+                                                     plot.title.size = 15)))+
+  add_risktable_strata_symbol()+
+  scale_x_continuous(breaks=seq(0,11,by=1),limits=c(0,11.3))+
+  scale_y_continuous(limits = c(0,0.5))+
+  scale_color_manual(values = c('#F87664', '#00BFC4'),
+                     labels = c('No Hemiarch', 'Hemiarch')) +
+  scale_fill_manual(values = c('#F87664', '#00BFC4'),
+                    labels = c('No Hemiarch', 'Hemiarch'))+
+  theme_survminer()
+ggexport(p_cif,"htad_reop.pdf")
+
+tbl_reop<-p_cif$data %>% 
+  filter(time %in% c(1,3,4.9,5,5.2,6.8,9.6,9.9)) %>% 
+  select(time, strata,estimate,conf.low,conf.high) %>% 
+  mutate(text=paste0(round(estimate*100,1)," (",round(conf.low*100,1),"-",round(conf.high*100,1),")"))
+cuminc(Surv(reop_competeyr10,reop_compete10)~prochemi,kmtest)
+```
+##4.2 BAV subgroup
+```{r tables}
+df_bav<-df %>% filter(hx_bav==1)
+
+#table
+subvar=c(var_demo,colnames(df_var)[c(49,52:70)])
+subvar_cat=subvar[!subvar %in% c("age","bmi")]
+print(CreateTableOne(subvar,strata = "prochemi",data=df_bav,
+               factorVars = subvar_cat,includeNA = T),
+      noSpaces = T,nonnormal = c("age", "bmi"),
+      exact = subvar[!subvar %in% c("hx_htn","hx_smoking","hx_cad",
+                                    "vlv_fail","cva","composite","reop_pacer")])
+
+print(CreateCatTable("sex",data=df_bav,strata = "prochemi"),
+      showAllLevels = T)
+
+print(CreateCatTable("cvatype",strata = "prochemi",
+                     data=df_bav[df_bav$cva==1,],includeNA = T),
+      showAllLevels = T,exact = "cvatype")
+
+print(CreateCatTable("diss_type",strata = "prochemi",
+                     data=df_bav[df_bav$disect==1,],includeNA = T),
+      showAllLevels = T,exact = "diss_type")
+```
+
+
+```{r KM curves}
+kmtest<-df_bav %>% 
+  select(prochemi,composite,fu_comp_yr,mort_all,fu_mort_yr,
+         cva_compete,cva_competeyr, reop_compete, reop_competeyr) %>% 
+  mutate(composite10=ifelse(fu_comp_yr>10,0,composite),
+         fu_comp_yr10=ifelse(fu_comp_yr>10,10,fu_comp_yr),
+         mort10=ifelse(fu_mort_yr>10,0,mort_all),
+         fu_mort_yr10=ifelse(fu_mort_yr>10,10,fu_mort_yr),
+         cva_compete10=ifelse(cva_competeyr>10,0,as.character(cva_compete)),
+         cva_competeyr10=ifelse(cva_competeyr>10,10,cva_competeyr),
+         cva_compete10=factor(cva_compete10,levels=c("0","1","2")),
+         
+         reop_compete10=ifelse(reop_competeyr>10,0,as.character(reop_compete)),
+         reop_competeyr10=ifelse(reop_competeyr>10,10,reop_competeyr),
+         reop_compete10=factor(reop_compete10,levels=c("0","1","2")),
+         )
+
+####composite outcome####
+km_comp<-survfit(Surv(fu_comp_yr,composite)~prochemi,data=df_bav)
+
+surv_comp<-ggsurvplot(km_comp,
+                   title = "Freedom from composite outcome",
+                   subtitle="Among patients with BAV",
+                   xlab = "Follow-up time (year)",
+                   conf.int = T,
+                   break.time.by = 1,
+                   ylim=c(0.5,1),
+                   xlim=c(0,11),
+                   risk.table = TRUE,
+                   tables.height = 0.2,
+                   censor = F,
+                   legend.labs=c("No Hemiarch","Hemiarch"),
+                   tables.theme = theme_cleantable())
+ggexport(surv_comp,"bav_composite.pdf")
+
+t<-summary(km_comp,times = c(1,3,5,7,10))
+cols <- lapply(c(2:6,15,16,10) , function(x) t[x])
+tbl_comp<- do.call(data.frame, cols) %>% 
+  mutate(text=paste0(round(surv*100,1)," (",round(lower*100,1),"-",round(upper*100,1),")"))
+survdiff(Surv(fu_comp_yr,composite)~prochemi,data=df_bav,fu_comp_yr<=10)
+
+survdiff(Surv(fu_comp_yr10,composite10)~prochemi,data=kmtest)
+
+####mortality####
+km_mort<-survfit(Surv(fu_mort_yr,mort_all)~prochemi,data=df_bav)
+
+surv_mort<-ggsurvplot(km_mort,
+                   title = "Freedom from death",
+                   subtitle="Among patients with BAV",
+                   xlab = "Follow-up time (year)",
+                   conf.int = T,
+                   break.time.by = 1,
+                   xlim=c(0,11),
+                   ylim=c(0.5,1),
+                   risk.table = TRUE,
+                   tables.height = 0.2,
+                   censor = F,
+                   legend.labs=c("No Hemiarch","Hemiarch"),
+                   tables.theme = theme_cleantable())
+
+ggexport(surv_mort,"bav_death.pdf")
+
+t<-summary(km_mort,times = c(1,3,5,7,10))
+cols <- lapply(c(2:6,15,16,10) , function(x) t[x])
+tbl_death<- do.call(data.frame, cols) %>% 
+  mutate(text=paste0(round(surv*100,1)," (",round(lower*100,1),"-",round(upper*100,1),")"))
+survdiff(Surv(fu_mort_yr,mort_all)~prochemi,data=df_bav,fu_mort_yr<=10)
+
+survdiff(Surv(fu_mort_yr10,mort10)~prochemi,data=kmtest)
+
+
+####cva####
+cif<-cuminc(Surv(cva_competeyr,cva_compete)~prochemi,df_bav) 
+
+p_cif<-ggcuminc(cif,linewidth=1,outcome = 1) + 
+  add_censor_mark(size=1.5) +
+  labs(x = "Follow-up time (year)",
+       title="Cumulative incidence of CVA with competing risk of death",
+       subtitle="Among patients with BAV",) + 
+  add_confidence_interval() +
+  add_risktable(risktable_stats = c("n.risk"),
+                size=4,
+                stats_label = list(n.risk = "Number at Risk"),
+                risktable_height=0.15,
+                theme = list(theme_risktable_default(axis.text.y.size = 12, 
+                                                     plot.title.size = 15)))+
+  add_risktable_strata_symbol()+
+  scale_x_continuous(breaks=seq(0,11,by=1),limits=c(0,11.3))+
+  scale_y_continuous(limits = c(0,1))+
+  scale_color_manual(values = c('#F87664', '#00BFC4'),
+                     labels = c('No Hemiarch', 'Hemiarch')) +
+  scale_fill_manual(values = c('#F87664', '#00BFC4'),
+                    labels = c('No Hemiarch', 'Hemiarch'))+
+  theme_survminer()
+
+tbl_cva<-p_cif$data %>% 
+  filter(time %in% c(1,2.9,3,5,6.6,6.8,9.9,10)) %>% 
+  select(time, strata,estimate,conf.low,conf.high) %>% 
+  mutate(text=paste0(round(estimate*100,1)," (",round(conf.low*100,1),"-",round(conf.high*100,1),")"))
+
+
+####reintervention####
+cif<-cuminc(Surv(reop_competeyr,reop_compete)~prochemi,df_bav) 
+
+p_cif<-ggcuminc(cif,linewidth=1,outcome = 1) + 
+  #add_censor_mark(size=1.5) +
+  labs(x = "Follow-up time (year)",
+       title="Cumulative incidence of aortic reintervention with competing \n risk of death",
+       subtitle="Among patients with BAV",) + 
+  #add_confidence_interval() +
+  add_risktable(risktable_stats = c("n.risk"),
+                size=4,
+                stats_label = list(n.risk = "Number at Risk"),
+                risktable_height=0.15,
+                theme = list(theme_risktable_default(axis.text.y.size = 12, 
+                                                     plot.title.size = 15)))+
+  add_risktable_strata_symbol()+
+  scale_x_continuous(breaks=seq(0,11,by=1),limits=c(0,11.3))+
+  scale_y_continuous(limits = c(0,0.5))+
+  scale_color_manual(values = c('#F87664', '#00BFC4'),
+                     labels = c('No Hemiarch', 'Hemiarch')) +
+  scale_fill_manual(values = c('#F87664', '#00BFC4'),
+                    labels = c('No Hemiarch', 'Hemiarch'))+
+  theme_survminer()
+
+ggexport(p_cif,"bav_reop.pdf")
+
+tbl_reop<-p_cif$data %>% 
+  filter(time %in% c(1,3,5,6.6,6.8,9.9,10)) %>% 
+  select(time, strata,estimate,conf.low,conf.high) %>% 
+  mutate(text=paste0(round(estimate*100,1)," (",round(conf.low*100,1),"-",round(conf.high*100,1),")"))
+
+cuminc(Surv(reop_competeyr10,reop_compete10)~prochemi,kmtest)
+```
+
+# 5.other analysis
+```{r other analysis}
+#circulatory arrest subgroup
+df_arest<-df %>% 
+  filter(circarrest==1) %>% 
+  mutate(retrograd=ifelse(cerebral_perf_strategy___5==1,1,0)) %>% 
+  select(cerebral_perf_time:cerebralperf,retrograd,cva30)
+
+print(CreateCatTable(vars = c("cerebralperf","retrograd"),
+               df_arest,strata="cva30"),
+      showAllLevels = T,exact = c("cerebralperf","retrograd"))
+
+df_arest<-df_match %>% 
+  filter(circarrest==1) %>% 
+  mutate(retrograd=ifelse(cerebral_perf_strategy___5==1,1,0)) %>% 
+  select(cerebral_perf_time:cerebralperf,retrograd,cva)
+
+print(CreateCatTable(vars = colnames(df_arest)[2:7],
+               data=df_arest,includeNA = T))
+
+
+#CVA and willisi_variation
+print(CreateCatTable("willisi_variation",strata="cva30",
+               data = df[df$willisi_variation!=2,]),
+      showAllLevels = T)
+
+print(CreateCatTable("willisi_variation",strata="cva",
+               data = df_match[df_match$willisi_variation!=2,]),
+      showAllLevels = T)
+
+
+
+#Diameter and composite outcome
+art_len<-coxph(Surv(fu_comp_yr,composite)~prochemi+art_length_group,
+               data=df)
+tidy(art_len,exponentiate = T)
+
+art_asc<-coxph(Surv(fu_comp_yr,composite)~prochemi+diameter_asc_precta_2_group,
+               data=df)
+tidy(art_asc,exponentiate = T)
+
+
+
+art_len<-coxph(Surv(fu_comp_yr,composite)~prochemi+art_length_group,
+               data=df_match)
+tidy(art_len,exponentiate = T)
+
+art_asc_m<-coxph(Surv(fu_comp_yr,composite)~prochemi+diameter_asc_precta_2_group,
+               data=df_match)
+tidy(art_asc_m,exponentiate = T)
+
+asc<-df %>% 
+  filter(!is.na(diameter_asc_precta_2_group)) %>% 
+  group_by(prochemi,diameter_asc_precta_2_group) %>% 
+  summarise(total=n(),count=sum(composite==1),
+            percent=round(count/total*100,1))
+
+for(i in 1:5){
+  print(prop.test(x=unlist(asc[c(i,i+5),4]),n=unlist(asc[c(i,i+5),3])))
+}
+
+fisher.test(matrix(c(3,52,8,79),ncol=2))
+
+length<-df %>% 
+  filter(!is.na(art_length_group)) %>% 
+  group_by(prochemi,art_length_group) %>% 
+  summarise(total=n(),count=sum(composite==1),
+            percent=round(count/total*100,1),
+            remain=total-count)
+fisher.test(matrix(c(7,7,80-7,24-7),ncol=2))
+
+
+for(i in 3:4){
+  print(prop.test(x=unlist(length[c(i,i+6),4]),n=unlist(length[c(i,i+6),3])))
+}
+
+for(i in c(1,2,5,6)){
+  print(fisher.test(matrix(unlist(length[c(i,i+6),c(4,6)]),ncol=2)))
+}
+fisher.test(matrix(c(2,2,40-3,12-3),ncol=2))
+fisher.test(matrix(c(2,3,17-2,19-3),ncol=2))
+```
+
+```{r plots of indices}
+library(ggsignif)
+df_indx<-df %>% 
+  select(prochemi,indx_diameter,indx_diameter_group,
+         indx_length,indx_length_group,diameter_asc_precta_length,
+         art_length_group,diameter_asc_precta_2,diameter_asc_precta_2_group,
+         composite,reop_art) %>% 
+  mutate(prochemi=factor(prochemi,labels =c("No Hemiarch", "Hemiarch")))
+
+
+####diameter index####
+DHI<-df_indx %>% 
+  group_by(indx_diameter_group,prochemi) %>% 
+  summarise(total=n(),
+            composite=sum(composite==1),
+            reop=sum(reop_art==1),
+            pct_comp=round(composite/total*100,1),
+            pct_reop=round(reop/total*100,1),
+            compremain=total-composite,
+            reopremain=total-reop)
+
+for (i in seq(1,5,2)) {
+    temp<-fisher.test(matrix(c(unlist(df_diameter[c(i,i+1),c(4,8)])),ncol=2))
+    print(temp)
+
+}
+
+for (i in seq(7,11,2)) {
+    temp<-prop.test(x=df_diameter$composite[c(i,i+1)],n=df_diameter$total[c(i,i+1)])
+    print(temp)
+
+}
+
+diameter_comp<-ggplot(data=df_diameter,
+       aes(x=indx_diameter_group,y=pct_comp,fill=prochemi))+
+  geom_col(position = "dodge", width = 0.8)+
+  labs(x="Diameter height index (cm/m)",
+       y="Percent of composite outcome (%)",
+       fill="Group", title = "Composite outcome")+
+  theme_classic()+
+  scale_x_discrete(labels=c("<1.5","1.5-1.79","1.8-1.99","2-2.29",
+                            ">=2.3","Unknown"))+
+  geom_text(aes(label=pct_comp),position=position_dodge(width = 0.8),vjust=1.5)+
+  geom_signif(xmin = seq(0.8,5.8,1),
+              xmax = seq(1.15,6.15,1),
+              y_position = c(16.4,11.8, 9.3, 9.9,21.8,23.2),
+              annotation = "NS",
+              tip_length = 0.02,
+              textsize = 3,
+              vjust=-0.25)
+
+
+
+for (i in seq(1,11,2)) {
+    temp<-fisher.test(matrix(c(unlist(df_diameter[c(i,i+1),c(5,9)])),ncol=2))
+    print(temp)
+
+}
+
+diameter_reop<-ggplot(data=df_diameter,
+       aes(x=indx_diameter_group,y=pct_reop,fill=prochemi))+
+  geom_col(position = "dodge", width = 0.8)+
+  labs(x="Diameter height index (cm/m)",
+       y="Percent of reoperation (%)",
+       fill="Group", title = "Reoperation")+
+  theme_classic()+
+  scale_x_discrete(labels=c("<1.5","1.5-1.79","1.8-1.99","2-2.29",
+                            ">=2.3","Unknown"))+
+  geom_text(aes(label=pct_reop),position=position_dodge(width = 0.78),vjust=1.5)+
+  geom_signif(xmin = seq(0.8,5.8,1),
+              xmax = seq(1.15,6.15,1),
+              y_position = c(8.2,5.9,3.3,2.3,3.8,4.2),
+              annotation = "NS",
+              tip_length = 0.02,
+              textsize = 3,
+              vjust=-0.25)
+
+
+
+
+####length index####
+LHI<-df_indx %>% 
+  group_by(indx_length_group,prochemi) %>% 
+  summarise(total=n(),
+            composite=sum(composite==1),
+            reop=sum(reop_art==1),
+            pct_comp=round(composite/total*100,1),
+            pct_reop=round(reop/total*100,1),
+            compremain=total-composite,
+            reopremain=total-reop)
+
+for (i in c(1,3,9)) {
+    temp<-fisher.test(matrix(c(unlist(df_length[c(i,i+1),c(4,8)])),ncol=2))
+    print(temp)
+}
+
+for (i in c(5,7,11)) {
+    temp<-prop.test(x=df_length$composite[c(i,i+1)],n=df_length$total[c(i,i+1)])
+    print(temp)
+}
+
+LHI_comp<-ggplot(data=df_length,
+       aes(x=indx_length_group,y=pct_comp,fill=prochemi))+
+  geom_col(position = "dodge",width = 0.8)+
+  labs(x="Length height index (cm/m)",
+       y="Percent of composite outcome (%)",
+       fill="Group", title = "Composite outcome")+
+  theme_classic()+
+  scale_x_discrete(labels=c("<5.5","5.5-5.99","6-6.49","6.5-6.99",
+                            ">=7","Unknown"))+
+  geom_text(aes(label=pct_comp),position=position_dodge(width = 0.8),vjust=1.5)+
+  geom_signif(xmin = seq(0.8,5.8,1),
+              xmax = seq(1.15,6.15,1),
+              y_position = c(9,9,10,13,14,21.5),
+              annotation = "NS",
+              tip_length = 0.02,
+              textsize = 3,
+              vjust=-0.25)
+
+
+
+
+for (i in seq(1,11,2)) {
+    temp<-fisher.test(matrix(c(unlist(df_length[c(i,i+1),c(5,9)])),ncol=2))
+    print(temp)
+}
+
+LHI_reop<-ggplot(data=df_length,
+       aes(x=indx_length_group,y=pct_reop,fill=prochemi))+
+  geom_col(position = "dodge",width = 0.8)+
+  labs(x="Length height index (cm/m)",
+       y="Percent of reoperation (%)",
+       fill="Group", title = "Reoperation")+
+  theme_classic()+
+  scale_x_discrete(labels=c("<5.5","5.5-5.99","6-6.49","6.5-6.99",
+                            ">=7","Unknown"))+
+  geom_text(aes(label=pct_reop),position=position_dodge(width = 0.8),vjust=1.5)+
+  geom_signif(xmin = seq(1.8,5.8,1),
+              xmax = seq(2.15,6.15,1),
+              y_position = c(2.3,2,5.6,8.4,3.9),
+              annotation = "NS",
+              tip_length = 0.02,
+              textsize = 3,
+              vjust=-0.25)
+
+
+ggsave(DHI_comp,filename="DHI_composite.pdf", height = 5,width = 10)
+ggsave(DHI_reop,filename="DHI_reop.pdf", height = 5,width = 10)
+ggsave(LHI_comp,filename="LHI_composite.pdf", height = 5,width = 10)
+ggsave(LHI_reop,filename="LHI_reop.pdf", height = 5,width = 10)
+
+
+####diameter####
+diameter<-df_indx %>% 
+  group_by(diameter_asc_precta_2_group,prochemi) %>% 
+  summarise(total=n(),
+            composite=sum(composite==1),
+            pct_comp=round(composite/total*100,1),
+            compremain=total-composite)
+
+for (i in 3) {
+    temp<-fisher.test(matrix(c(unlist(diameter[c(i,i+1),c(4,6)])),ncol=2))
+    print(temp)
+}
+
+for (i in c(1,5,7,9,11)) {
+    temp<-prop.test(x=diameter$composite[c(i,i+1)],n=diameter$total[c(i,i+1)])
+    print(temp)
+}
+
+diameter_comp<-ggplot(data=diameter,
+       aes(x=diameter_asc_precta_2_group,y=pct_comp,fill=prochemi))+
+  geom_col(position = "dodge",width = 0.8)+
+  labs(x="Pre-op ascending diameter (mm)",
+       y="Percent of composite outcome (%)",
+       fill="Group", title = "Composite outcome")+
+  theme_classic()+
+  scale_x_discrete(labels=c("<30","30-34.9","35-39.9","40-44.9",
+                            ">=45","Unknown"))+
+  geom_text(aes(label=pct_comp),position=position_dodge(width = 0.8),vjust=1.5)+
+  geom_signif(xmin = seq(0.8,5.8,1),
+              xmax = seq(1.15,6.15,1),
+              y_position = c(23.7, 10.3, 11.2, 15.1, 44.9, 24.2),
+              annotation = "NS",
+              tip_length = 0.02,
+              textsize = 3,
+              vjust=-0.25)
+
+
+####length####
+length<-df_indx %>% 
+  group_by(art_length_group,prochemi) %>% 
+  summarise(total=n(),
+            composite=sum(composite==1),
+            pct_comp=round(composite/total*100,1),
+            compremain=total-composite)
+
+for (i in c(1,3)) {
+    temp<-fisher.test(matrix(c(unlist(length[c(i,i+1),c(4,6)])),ncol=2))
+    print(temp)
+}
+
+for (i in seq(5,11,2)) {
+    temp<-prop.test(x=length$composite[c(i,i+1)],n=length$total[c(i,i+1)])
+    print(temp)
+}
+
+length_comp<-ggplot(data=length,
+       aes(x=art_length_group,y=pct_comp,fill=prochemi))+
+  geom_col(position = "dodge",width = 0.8)+
+  labs(x="Pre-op aortic length (mm)",
+       y="Percent of composite outcome (%)",
+       fill="Group", title = "Composite outcome")+
+  theme_classic()+
+  scale_x_discrete(labels=c("<90","90-99.9","100-109.9","110-119.9",
+                            ">=120","Unknown"))+
+  geom_text(aes(label=pct_comp),position=position_dodge(width = 0.8),vjust=1.5)+
+  geom_signif(xmin = seq(0.8,5.8,1),
+              xmax = seq(1.15,6.15,1),
+              y_position = c(15.3,12.4,10.4,10.1,12.9,21.4),
+              annotation = "NS",
+              tip_length = 0.02,
+              textsize = 3,
+              vjust=-0.25)
+ggsave(diameter_comp,filename="diameter_composite.pdf", 
+       height = 5,width = 10)
+ggsave(length_comp,filename="length_composite.pdf", 
+       height = 5,width = 10)
+```
+
+```{r phenotype}
+pheno_glm<-glm(composite~prochemi+ phenotype+
+                    age+ sex+ demo_prior+  cpb,df, 
+               family=binomial)
+car::vif(pheno_glm)
+
+pheno_comp1<-coxph(Surv(fu_comp_yr,composite)~prochemi+ phenotype+
+                    age+ sex+ demo_prior+ cpb,df)
+broom::tidy(pheno_comp1,exp=T, conf.int=T)
+
+pheno_comp2<-coxph(Surv(fu_comp_yr,composite)~prochemi+ phenotype+
+                    age+ sex+ demo_prior+ cpb+ cnnct_tss,df)
+broom::tidy(pheno_comp2,exp=T, conf.int=T)
+
+pheno_death<-coxph(Surv(fu_mort_yr,mort_all)~prochemi+ phenotype+
+                    age+ sex+ demo_prior+ cpb,df)
+broom::tidy(pheno_death,exp=T)
+####survival
+pheno_comp0<-survfit(Surv(fu_comp_yr,composite)~prochemi,data=df[df$phenotype==0,])
+
+comp0<-ggsurvplot(pheno_comp0,
+                   title = "Freedom from composite outcome",
+                   subtitle="Among patients without phenotype",
+                   xlab = "Follow-up time (year)",
+                   conf.int = T,
+                   break.time.by = 1,
+                   ylim=c(0.5,1),
+                   xlim=c(0,11),
+                   risk.table = TRUE,
+                   tables.height = 0.2,
+                   censor = F,
+                   legend.labs=c("No Hemiarch","Hemiarch"),
+                   tables.theme = theme_cleantable())
+
+t<-summary(pheno_comp0,times = c(1,3,5,7,10))
+cols <- lapply(c(2:6,15,16,10) , function(x) t[x])
+tbl_comp<- do.call(data.frame, cols)%>% 
+  mutate(text=paste0(round(surv*100,1)," (",round(lower*100,1),"-",round(upper*100,1),")"))
+
+survdiff(Surv(fu_comp_yr10,composite10)~prochemi,data=kmtest[kmtest$phenotype==0,])
+
+ggexport(comp0,filename="pheno0_composite.pdf")
+
+
+pheno_comp1<-survfit(Surv(fu_comp_yr,composite)~prochemi,data=df[df$phenotype==1,])
+
+comp1<-ggsurvplot(pheno_comp1,
+                   title = "Freedom from composite outcome",
+                   subtitle="Among patients with phenotype",
+                   xlab = "Follow-up time (year)",
+                   conf.int = T,
+                   break.time.by = 1,
+                   ylim=c(0.5,1),
+                   xlim=c(0,11),
+                   risk.table = TRUE,
+                   tables.height = 0.2,
+                   censor = F,
+                   legend.labs=c("No Hemiarch","Hemiarch"),
+                   tables.theme = theme_cleantable())
+
+t<-summary(pheno_comp1,times = c(1,3,5,7,10))
+cols <- lapply(c(2:6,15,16,10) , function(x) t[x])
+tbl_comp<- do.call(data.frame, cols) %>% 
+  mutate(text=paste0(round(surv*100,1)," (",round(lower*100,1),"-",round(upper*100,1),")"))
+
+survdiff(Surv(fu_comp_yr10,composite10)~prochemi,data=kmtest[kmtest$phenotype==1,])
+
+ggexport(comp1,filename="pheno1_composite.pdf")
+
+print(CreateContTable("age",data=df[!is.na(df$phenotype),],
+                strata = "phenotype"),
+      nonnormal = "age")
+
+```
+
+# 6.Supplement
+```{r subgroup with diameter_pre_asc2<45mm}
+df_45<-df %>% filter(diameter_asc_precta_2<45)
+
+print(CreateTableOne(subvar,strata = "prochemi",data=df_45,
+               factorVars = subvar_cat,includeNA = T),
+      smd = T, noSpaces = T,nonnormal = numvar_demo,
+      exact = c("nyha","bavtype","conjoinedcusp","disect", "reop_art",
+                "mort30","reop_art30", "hypoxic30", "diss_type",
+                "disect30","reop_surg0", "reop_surg1","reop_surg2",
+                "reop_surg3","reop_surg4"))
+
+print(CreateCatTable("sex",strata = "prochemi",data=df_45),
+      smd = T, noSpaces = T, showAllLevels = T)
+
+
+prop.test(x=c(19,12),n=c(585,401))
+
+#subvariables
+print(CreateCatTable("cvatype",strata = "prochemi",
+                     data=df_45[df_45$cva==1,]),
+      noSpaces = T,exact="cvatype",showAllLevels = T)
+
+print(CreateCatTable("cvatype",strata = "prochemi",
+                     data=df_45[df_45$cva30==1,]),
+      noSpaces = T,exact="cvatype",showAllLevels = T)
+
+print(CreateCatTable("diss_type",strata = "prochemi",
+                     data=df_45[df_45$disect==1,]),
+      noSpaces = T,exact="diss_type")
+
+print(CreateCatTable(c("stroke_cat","stroke_severity","stroke_rankin"),
+                     strata = "prochemi",data=df_45[df_45$cvatype==2,],
+                     includeNA = T),
+      noSpaces = T,showAllLevels = T,
+      exact = c("stroke_cat","stroke_severity","stroke_rankin"))
+
+
+print(CreateCatTable("cause_of_mort",strata = "prochemi",
+                     data=df_45[df_45$mort_all==1,]),
+      noSpaces = T,showAllLevels = T)
+
+print(CreateCatTable("cause_of_mort",strata = "prochemi",
+                     data=df_45[df_45$mort30==1,]),
+      noSpaces = T,showAllLevels = T, exact="cause_of_mort")
+
+
+```
+
+```{r matching}
+prematch<-df_45 %>% 
+  select(mrn,prochemi,sex, age, hx_bav, cnnct_tss, hx_htn, hx_diabetes, 
+         hx_smoking, hx_cad, hx_copd, hx_stroke, bmi, nyha, 
+         demo_prior, diameter_asc_precta_2_45, lvef_intra)
+
+nacheck<-prematch %>%
+  summarise_all(~sum(is.na(.))) %>% 
+  t()
+
+prematch[is.na(prematch)]<--1
+
+#check VIF of the matching model
+m_match<-glm(prochemi~sex+ age+ hx_bav+ cnnct_tss+ hx_htn+ 
+               hx_diabetes+ hx_smoking+ hx_cad+ hx_copd+ 
+               hx_stroke+ bmi+ nyha+ demo_prior+ lvef_intra, 
+               data = prematch,family = binomial)
+car::vif(m_match)
+
+match_near<-matchit(prochemi~sex+ age+ hx_bav+ cnnct_tss+ hx_htn+ 
+                    hx_diabetes+ hx_smoking+ hx_cad+ hx_copd+ 
+                    hx_stroke+ bmi+ nyha+ demo_prior+ lvef_intra, 
+                    data = prematch,distance = "glm", caliper = 0.2)
+
+match_opt<-matchit(prochemi~sex+ age+ hx_bav+ cnnct_tss+ hx_htn+ 
+                    hx_diabetes+ hx_smoking+ hx_cad+ hx_copd+ 
+                    hx_stroke+ bmi+ nyha+ demo_prior+ lvef_intra, 
+                    data = prematch,distance = "glm", method = "optimal")
+
+plot(summary(match_near))
+
+match45<-match.data(match_opt) %>% 
+  select(mrn,subclass) %>% 
+  left_join(df_45)
+
+```
+
+```{r table after matching}
+print(CreateTableOne(subvar,strata = "prochemi",data=match45,
+               factorVars = subvar_cat,includeNA = T),
+      smd = T, noSpaces = T,nonnormal = numvar_demo,
+      exact = c("nyha","bavtype","conjoinedcusp",
+                "mort30","reop_art30", "hypoxic30", "diss_type",
+                "disect30","reop_surg0", "reop_surg1","reop_surg2",
+                "reop_surg3","reop_surg4"))
+
+print(CreateCatTable("sex",strata = "prochemi",data=match45),
+      smd = T, noSpaces = T, showAllLevels = T)
+
+
+lapply(select(match45,age, bmi,all_of(numvar_other)), shapiro.test)
+#diameter_arch_precta,diameter_asc_precta_length normal
+
+
+prop.test(x=c(19,12),n=c(585,401))
+
+
+print(CreateCatTable("cvatype",strata = "prochemi",
+                     data=match45[match45$cva==1,]),
+      noSpaces = T,exact="cvatype",showAllLevels = T)
+
+print(CreateCatTable("diss_type",strata = "prochemi",
+                     data=match45[match45$disect==1,]),
+      noSpaces = T,exact="diss_type")
+
+print(CreateCatTable(c("stroke_cat","stroke_severity","stroke_rankin"),
+                     strata = "prochemi",data=match45[match45$cvatype==2,],
+                     includeNA = T),
+      noSpaces = T,showAllLevels = T,
+      exact = c("stroke_cat","stroke_severity","stroke_rankin"))
+
+
+print(CreateCatTable("cause_of_mort",strata = "prochemi",
+                     data=match45[match45$mort_all==1,]),
+      noSpaces = T,showAllLevels = T)
+
+print(CreateCatTable("cause_of_mort",strata = "prochemi",
+                     data=match45[match45$mort30==1,]),
+      noSpaces = T,showAllLevels = T, exact="cause_of_mort")
+
+print(CreateCatTable("diss_type",strata = "prochemi",
+                     data=match45[match45$disect==1,]),
+      noSpaces = T,showAllLevels = T)
+```
+
+```{r survival analysis before matching}
+kmtest<-df_45 %>% 
+  select(prochemi,composite,fu_comp_yr,mort_all,fu_mort_yr,
+         cva_compete,cva_competeyr, reop_compete, reop_competeyr) %>% 
+  mutate(composite10=ifelse(fu_comp_yr>10,0,composite),
+         fu_comp_yr10=ifelse(fu_comp_yr>10,10,fu_comp_yr),
+         mort10=ifelse(fu_mort_yr>10,0,mort_all),
+         fu_mort_yr10=ifelse(fu_mort_yr>10,10,fu_mort_yr),
+         cva_compete10=ifelse(cva_competeyr>10,0,as.character(cva_compete)),
+         cva_competeyr10=ifelse(cva_competeyr>10,10,cva_competeyr),
+         cva_compete10=factor(cva_compete10,levels=c("0","1","2")),
+         reop_compete10=ifelse(reop_competeyr>10,0,as.character(reop_compete)),
+         reop_competeyr10=ifelse(reop_competeyr>10,10,reop_competeyr),
+         reop_compete10=factor(reop_compete10,levels=c("0","1","2")))
+
+
+####composite outcome####
+km_comp<-survfit(Surv(fu_comp_yr,composite)~prochemi,data=df_45)
+
+surv_comp<-ggsurvplot(km_comp,
+                   title = "Freedom from composite outcome before matching",
+                   subtitle="Among patients with pre-op ascending diameter<45",
+                   xlab = "Follow-up time (year)",
+                   conf.int = T,
+                   break.time.by = 1,
+                   xlim=c(0,11),
+                   ylim=c(0.5,1),
+                   risk.table = TRUE,
+                   tables.height = 0.2,
+                   censor = F,
+                   legend.labs=c("No Hemiarch","Hemiarch"),
+                   tables.theme = theme_cleantable())
+ggexport(surv_comp,"composite45_unmatch.pdf")
+
+t<-summary(km_comp,times = c(1,3,5,7,10))
+cols <- lapply(c(2:6,15,16,10) , function(x) t[x])
+tbl_comp<- do.call(data.frame, cols) %>% 
+  mutate(text=paste0(round(surv*100,1)," (",round(lower*100,1),"-",round(upper*100,1),")"))
+survdiff(Surv(fu_comp_yr,composite)~prochemi,data=kmtest,fu_comp_yr<=10)
+
+survdiff(Surv(fu_comp_yr10,composite10)~prochemi,data=kmtest)
+
+
+#####mortality####
+km_mort<-survfit(Surv(fu_mort_yr,mort_all)~prochemi,data=df_45)
+
+surv_mort<-ggsurvplot(km_mort,
+                   title = "Freedom from death before matching",
+                   subtitle="Among patients with pre-op ascending diameter<45",
+                   xlab = "Follow-up time (year)",
+                   conf.int = T,
+                   break.time.by = 1,
+                   xlim=c(0,11),
+                   ylim=c(0.5,1),
+                   risk.table = TRUE,
+                   tables.height = 0.2,
+                   censor = F,
+                   legend.labs=c("No Hemiarch","Hemiarch"),
+                   tables.theme = theme_cleantable())
+
+ggexport(surv_mort,"death45_unmatch.pdf")
+
+t<-summary(km_mort,times = c(1,3,5,7,10))
+cols <- lapply(c(2:6,15,16,10) , function(x) t[x])
+tbl_death<- do.call(data.frame, cols) %>% 
+  mutate(text=paste0(round(surv*100,1)," (",round(lower*100,1),"-",round(upper*100,1),")"))
+survdiff(Surv(fu_mort_yr,mort_all)~prochemi,data=df_45,fu_mort_yr<=10)
+
+survdiff(Surv(fu_mort_yr10,mort10)~prochemi,data=kmtest_match)
+
+####reintervention####
+cif<-cuminc(Surv(reop_competeyr,reop_compete)~prochemi,df_45) 
+
+p_cif<-ggcuminc(cif,linewidth=1,outcome = 1) + 
+  #add_censor_mark(size=1.5) +
+  labs(x = "Follow-up time (year)",title="Cumulative incidence of aortic reintervention with competing  \n risk of death before matching",
+       subtitle = "Among patients with pre-op ascending diameter<45") + 
+  add_confidence_interval() +
+  add_risktable(risktable_stats = c("n.risk"),
+                size=4,
+                stats_label = list(n.risk = "Number at Risk"),
+                risktable_height=0.15,
+                theme = list(theme_risktable_default(axis.text.y.size = 12, 
+                                                     plot.title.size = 15)))+
+  add_risktable_strata_symbol()+
+  scale_x_continuous(breaks=seq(0,11,by=1),limits=c(0,11))+
+  scale_y_continuous(limits = c(0,0.5))+
+  scale_color_manual(values = c('#F87664', '#00BFC4'),
+                     labels = c('No Hemiarch', 'Hemiarch')) +
+  scale_fill_manual(values = c('#F87664', '#00BFC4'),
+                    labels = c('No Hemiarch', 'Hemiarch'))+
+  theme_survminer()
+
+ggexport(p_cif,"reop45_unmatch.pdf")
+
+tbl_reop<-p_cif$data %>% 
+  filter(time %in% c(1,3,5,6.9,7,9.9,10)) %>% 
+  select(time, strata,estimate,conf.low,conf.high) %>% 
+  mutate(text=paste0(round(estimate*100,1)," (",round(conf.low*100,1),"-",round(conf.high*100,1),")"))
+
+cuminc(Surv(reop_competeyr10,reop_compete10)~prochemi,kmtest)
+```
+
+
+```{r survival analysis after matching}
+kmtest_match<-match45 %>% 
+  select(prochemi,composite,fu_comp_yr,mort_all,fu_mort_yr,
+         cva_compete,cva_competeyr, reop_compete, reop_competeyr) %>% 
+  mutate(composite10=ifelse(fu_comp_yr>10,0,composite),
+         fu_comp_yr10=ifelse(fu_comp_yr>10,10,fu_comp_yr),
+         mort10=ifelse(fu_mort_yr>10,0,mort_all),
+         fu_mort_yr10=ifelse(fu_mort_yr>10,10,fu_mort_yr),
+         cva_compete10=ifelse(cva_competeyr>10,0,as.character(cva_compete)),
+         cva_competeyr10=ifelse(cva_competeyr>10,10,cva_competeyr),
+         cva_compete10=factor(cva_compete10,levels=c("0","1","2")),
+         reop_compete10=ifelse(reop_competeyr>10,0,as.character(reop_compete)),
+         reop_competeyr10=ifelse(reop_competeyr>10,10,reop_competeyr),
+         reop_compete10=factor(reop_compete10,levels=c("0","1","2")))
+
+
+####composite outcome####
+km_comp<-survfit(Surv(fu_comp_yr,composite)~prochemi,data=match45)
+
+surv_comp<-ggsurvplot(km_comp,
+                   title = "Freedom from composite outcome after matching",
+                   subtitle = "Among patients with pre-op ascending diameter<45",
+                   xlab = "Follow-up time (year)",
+                   conf.int = T,
+                   break.time.by = 1,
+                   xlim=c(0,11),
+                   ylim=c(0.5,1),
+                   risk.table = TRUE,
+                   tables.height = 0.2,
+                   censor = F,
+                   legend.labs=c("No Hemiarch","Hemiarch"),
+                   tables.theme = theme_cleantable())
+ggexport(surv_comp,"composite45_match.pdf")
+
+t<-summary(km_comp,times = c(1,3,5,7,10))
+cols <- lapply(c(2:6,15,16,10) , function(x) t[x])
+tbl_comp<- do.call(data.frame, cols) %>% 
+  mutate(text=paste0(round(surv*100,1)," (",round(lower*100,1),"-",round(upper*100,1),")"))
+survdiff(Surv(fu_comp_yr,composite)~prochemi,data=kmtest_match,fu_comp_yr<=10)
+
+survdiff(Surv(fu_comp_yr10,composite10)~prochemi,data=kmtest_match)
+
+
+#####mortality####
+km_mort<-survfit(Surv(fu_mort_yr,mort_all)~prochemi,data=match45)
+
+surv_mort<-ggsurvplot(km_mort,
+                   title = "Freedom from death after matching",
+                   subtitle = "Among patients with pre-op ascending diameter<45",
+                   xlab = "Follow-up time (year)",
+                   conf.int = T,
+                   break.time.by = 1,
+                   xlim=c(0,11),
+                   ylim=c(0.5,1),
+                   risk.table = TRUE,
+                   tables.height = 0.2,
+                   censor = F,
+                   legend.labs=c("No Hemiarch","Hemiarch"),
+                   tables.theme = theme_cleantable())
+
+ggexport(surv_mort,"death45_match.pdf")
+
+t<-summary(km_mort,times = c(1,3,5,7,10))
+cols <- lapply(c(2:6,15,16,10) , function(x) t[x])
+tbl_death<- do.call(data.frame, cols) %>% 
+  mutate(text=paste0(round(surv*100,1)," (",round(lower*100,1),"-",round(upper*100,1),")"))
+survdiff(Surv(fu_mort_yr,mort_all)~prochemi,data=match45,fu_mort_yr<=10)
+
+survdiff(Surv(fu_mort_yr10,mort10)~prochemi,data=kmtest_match)
+
+####reintervention####
+cif<-cuminc(Surv(reop_competeyr,reop_compete)~prochemi,match45) 
+
+p_cif<-ggcuminc(cif,linewidth=1,outcome = 1) + 
+  #add_censor_mark(size=1.5) +
+  labs(x = "Follow-up time (year)",
+       title="Cumulative incidence of aortic reintervention with competing  \n risk of death after matching",
+       subtitle = "Among patients with pre-op ascending diameter<45",) + 
+  add_confidence_interval() +
+  add_risktable(risktable_stats = c("n.risk"),
+                size=4,
+                stats_label = list(n.risk = "Number at Risk"),
+                risktable_height=0.15,
+                theme = list(theme_risktable_default(axis.text.y.size = 12, 
+                                                     plot.title.size = 15)))+
+  add_risktable_strata_symbol()+
+  scale_x_continuous(breaks=seq(0,11,by=1),limits=c(0,11))+
+  scale_y_continuous(limits = c(0,0.5))+
+  scale_color_manual(values = c('#F87664', '#00BFC4'),
+                     labels = c('No Hemiarch', 'Hemiarch')) +
+  scale_fill_manual(values = c('#F87664', '#00BFC4'),
+                    labels = c('No Hemiarch', 'Hemiarch'))+
+  theme_survminer()
+
+ggexport(p_cif,"reop45_match.pdf")
+
+tbl_reop<-p_cif$data %>% 
+  filter(time %in% c(1,3,5,6.9,7,9.9,10)) %>% 
+  select(time, strata,estimate,conf.low,conf.high) %>% 
+  mutate(text=paste0(round(estimate*100,1)," (",round(conf.low*100,1),"-",round(conf.high*100,1),")"))
+
+cuminc(Surv(reop_competeyr10,reop_compete10)~prochemi,kmtest_match)
+```
+
+
+
+#Archive
+```{r}
+
+         art_length_group=case_when(diameter_asc_precta_length<90~1,
+                                    diameter_asc_precta_length<100~2,
+                                    diameter_asc_precta_length<110~3,
+                                    diameter_asc_precta_length<120~4,
+                                    diameter_asc_precta_length<130~5,
+                                    diameter_asc_precta_length>=130~6),
+         art_length_group=factor(art_length_group, 
+                                 labels = c("<90","90-99.9","100-109.9",
+                                            "110-119.9","120-129.9",">=130")),
+         diameter_asc_precta_2_group=case_when(diameter_asc_precta_2<30~1,
+                                         diameter_asc_precta_2<40~2,
+                                         diameter_asc_precta_2<50~3,
+                                         diameter_asc_precta_2>=50~4),
+         diameter_asc_precta_2_group=factor(diameter_asc_precta_2_group,
+                                      labels = c("<30", "30-39.9",
+                                                 "40-49.9",">=50")),
+```
+
+
+```{r test}
+test<-df %>% 
+  select(mrn,composite,composite_dt,cva30,cva30_dt,mort_all,mort_date,reop_art,reop_art_dt,
+         disect,disect_dt,alive_date) %>% 
+  filter(mort_date<reop_art_dt)
+
+test<-df %>% 
+  select(mrn,reop_compete,reop_compete_dt, reop_art, reop_art_dt, mort_all, mort_date) %>% 
+  filter(reop_art==1 & mort_all==1)
+
+
+test<-df %>% 
+  select(mrn,dos ,composite,composite_dt,alive_date,fu_comp_yr)
+
+test<-df %>% 
+  select(mrn,dos ,mort_all, mort_date,cva,
+         cva_dt,cva_compete,cva_compete_dt,cva_competeyr)
+
+test<-df %>% 
+  select(mrn,postop_neuro,postop_neurotype, postop_strokedate) 
+
+%>% 
+  filter(mrn=="046057055")
+
+test<-df %>% 
+  select(cva_compete,cva_compete_dt,cva,cva_dt,mort_all,mort_date)
+
+test<-df %>% 
+  select(mrn,cva,dos,cva_dt,alive_date,fu_cva_dt,fu_cva_yr) 
+
+test<-df %>% 
+  select(dos,composite,composite_dt,vlv_fail,vlv_fail_dt,alive_date,
+         composite,fu_comp_dt) %>% 
+  arrange(desc(composite),composite)
+
+test<-df %>% 
+  select(vlv_fail,failure,failure_2,failure_3)
+
+test<-df %>% 
+  select(postop_neuro,postop_neurotype,postop_tiadate,postop_strokedate,postop_hypoxic,postop_cnshaemorr,
+         postop_cnshaemorr_2,cva,cva_dt)
+
+test<-df %>%
+  select(reop_art,reop_art_dt,starts_with("reop_date"),
+         starts_with("aorticprocedure")&ends_with(c("0","1","2","3","4")),
+         )
+
+test<-original %>% 
+  filter((prochemi==1&procz1==0&procz2==0&proctotarch==0)|
+           prochemi==0)
+
+test<-df %>% 
+  select(reop_art,reop_art2,starts_with("reop_reason") & ends_with("1"),
+         starts_with("aorticprocedure")&ends_with(c("0","1","2","3","4"))) %>% 
+  filter(reop_art==1&reop_art2==0)
+
+
+
+
+         diameter_asc_precta_2_group=case_when(diameter_asc_precta_2<30~1,
+                                         diameter_asc_precta_2<40~2,
+                                         diameter_asc_precta_2<50~3,
+                                         diameter_asc_precta_2>=50~4),
+         diameter_asc_precta_2_group=factor(diameter_asc_precta_2_group,
+                                      labels = c("<30", "30-39.9",
+                                                 "40-49.9",">=50")),
+```
+
+
